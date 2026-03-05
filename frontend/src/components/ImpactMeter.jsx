@@ -1,90 +1,68 @@
-// SVG semicircular Impact Meter gauge
+// SVG multi-segment gauge matching the other_project design
 // score: 0–100
 
-const ZONES = [
-    { range: [0, 35], color: "#EF4444", label: "Below Par", bg: "text-red-400" },
-    { range: [35, 65], color: "#F59E0B", label: "Neutral", bg: "text-amber-400" },
-    { range: [65, 80], color: "#10B981", label: "High Impact", bg: "text-emerald-400" },
-    { range: [80, 101], color: "#6366F1", label: "Elite Impact", bg: "text-indigo-400" },
-];
-
 function getZone(score) {
-    return ZONES.find((z) => score >= z.range[0] && score < z.range[1]) || ZONES[3];
+    if (score >= 80) return { label: "Elite Impact", color: "#a78bfa", bg: "rgba(167,139,250,0.15)" };
+    if (score >= 65) return { label: "High Impact", color: "#34d399", bg: "rgba(52,211,153,0.15)" };
+    if (score >= 35) return { label: "Neutral", color: "#fbbf24", bg: "rgba(251,191,36,0.15)" };
+    return { label: "Below Par", color: "#f87171", bg: "rgba(248,113,113,0.15)" };
 }
 
-function polarToCartesian(cx, cy, r, angleDeg) {
-    const rad = (angleDeg * Math.PI) / 180;
-    return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
-}
-
-function describeArc(cx, cy, r, startAngle, endAngle) {
-    const s = polarToCartesian(cx, cy, r, endAngle);
-    const e = polarToCartesian(cx, cy, r, startAngle);
-    const large = endAngle - startAngle <= 180 ? "0" : "1";
-    return `M ${s.x} ${s.y} A ${r} ${r} 0 ${large} 0 ${e.x} ${e.y}`;
-}
-
-export default function ImpactMeter({ score, inningsCount = 0, size = 240 }) {
+export default function ImpactMeter({ score, inningsCount = 0, size = 200 }) {
     const safeScore = score == null ? 0 : Math.min(100, Math.max(0, score));
     const zone = getZone(safeScore);
+    const cx = size / 2, cy = size * 0.62, r = size * 0.38;
+    const startAngle = 200, endAngle = 340;
+    const totalArc = endAngle - startAngle;
+    const needleAngle = startAngle + (safeScore / 100) * totalArc;
 
-    // Arc: -180° (left) to 0° (right) = 180° sweep
-    const arcStart = -180;
-    const arcEnd = arcStart + safeScore * 1.8;
+    function pt(angle, rad) {
+        const a = (angle - 90) * Math.PI / 180;
+        return { x: cx + rad * Math.cos(a), y: cy + rad * Math.sin(a) };
+    }
+    function arcPath(sa, ea, rad) {
+        const s = pt(sa, rad), e = pt(ea, rad);
+        const large = (ea - sa) > 180 ? 1 : 0;
+        return `M${s.x},${s.y} A${rad},${rad} 0 ${large},1 ${e.x},${e.y}`;
+    }
 
-    // Needle: starts at -90° (pointing up = score 50)
-    const needleAngle = -180 + safeScore * 1.8;
-    const cx = size / 2;
-    const cy = (size * 120) / 240; // 120 when size=240
-    const r = (size * 100) / 240;
-    const needleLen = r - 8;
+    const segments = [
+        { from: startAngle, to: startAngle + totalArc * 0.35, color: "#f87171" },
+        { from: startAngle + totalArc * 0.35, to: startAngle + totalArc * 0.65, color: "#fbbf24" },
+        { from: startAngle + totalArc * 0.65, to: startAngle + totalArc * 0.80, color: "#34d399" },
+        { from: startAngle + totalArc * 0.80, to: endAngle, color: "#a78bfa" },
+    ];
 
-    const needle = polarToCartesian(cx, cy, needleLen, needleAngle);
+    const needle = pt(needleAngle, r * 0.82);
+    const needleBase1 = pt(needleAngle + 90, r * 0.06);
+    const needleBase2 = pt(needleAngle - 90, r * 0.06);
 
     return (
-        <div className="flex flex-col items-center gap-2">
-            <svg width={size} height={size * 0.62} viewBox={`0 0 ${size} ${size * 0.62}`}>
-                {/* Background arc */}
-                <path
-                    d={describeArc(cx, cy, r, -180, 0)}
-                    fill="none"
-                    stroke="#374151"
-                    strokeWidth={size * 0.083}
-                    strokeLinecap="round"
-                />
-                {/* Coloured fill arc */}
-                {safeScore > 0 && (
-                    <path
-                        d={describeArc(cx, cy, r, arcStart, arcEnd)}
-                        fill="none"
-                        stroke={zone.color}
-                        strokeWidth={size * 0.083}
-                        strokeLinecap="round"
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+            <svg width={size} height={size * 0.78} viewBox={`0 0 ${size} ${size * 0.78}`}>
+                <path d={arcPath(startAngle, endAngle, r)} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={size * 0.07} />
+                {segments.map((seg, i) => (
+                    <path key={i} d={arcPath(seg.from, Math.min(seg.to, startAngle + (safeScore / 100) * totalArc), r)}
+                        fill="none" stroke={seg.color} strokeWidth={size * 0.065}
+                        opacity={seg.from < startAngle + (safeScore / 100) * totalArc ? 1 : 0.15}
                     />
-                )}
-                {/* Needle */}
-                <line
-                    x1={cx} y1={cy}
-                    x2={needle.x} y2={needle.y}
-                    stroke="#F9FAFB"
-                    strokeWidth={size * 0.012}
-                    strokeLinecap="round"
+                ))}
+                <polygon
+                    points={`${needle.x},${needle.y} ${needleBase1.x},${needleBase1.y} ${needleBase2.x},${needleBase2.y}`}
+                    fill={zone.color} opacity={0.95}
                 />
-                <circle cx={cx} cy={cy} r={size * 0.038} fill={zone.color} />
-
-                {/* Scale labels */}
-                <text x={size * 0.06} y={size * 0.6} fontSize={size * 0.048} fill="#6B7280" textAnchor="middle">0</text>
-                <text x={cx} y={size * 0.09} fontSize={size * 0.048} fill="#6B7280" textAnchor="middle">50</text>
-                <text x={size * 0.94} y={size * 0.6} fontSize={size * 0.048} fill="#6B7280" textAnchor="middle">100</text>
+                <circle cx={cx} cy={cy} r={size * 0.045} fill="#1a1a2e" stroke={zone.color} strokeWidth={2} />
+                <text x={cx} y={cy - r * 1.28} textAnchor="middle" fontSize={size * 0.095} fontWeight="800" fill={zone.color} fontFamily="'Barlow Condensed', sans-serif">
+                    {safeScore.toFixed(1)}
+                </text>
+                <text x={cx} y={cy - r * 1.07} textAnchor="middle" fontSize={size * 0.057} fill={zone.color} fontFamily="'Barlow Condensed', sans-serif" letterSpacing="1">
+                    {zone.label.toUpperCase()}
+                </text>
             </svg>
-
-            {/* Score display */}
-            <div className={`text-5xl font-black ${zone.bg}`}>
-                {score == null ? "—" : safeScore.toFixed(1)}
-            </div>
-            <div className={`text-sm font-semibold ${zone.bg}`}>{zone.label}</div>
             {inningsCount > 0 && (
-                <div className="text-xs text-gray-500">Based on last {inningsCount} innings</div>
+                <div style={{ fontSize: 12, color: "#64748b", fontFamily: "'Barlow Condensed', sans-serif" }}>
+                    Based on {inningsCount} innings
+                </div>
             )}
         </div>
     );

@@ -1,25 +1,35 @@
 import { Link, NavLink } from "react-router-dom";
 
-export default function NavBar() {
-    const linkClass = ({ isActive }) =>
-        `px-4 py-2 rounded-xl text-sm font-medium transition-colors ${isActive
-            ? "bg-green-600 text-white"
-            : "text-gray-400 hover:text-white hover:bg-gray-800"
-        }`;
+const navLinkStyle = (isActive) => ({
+    background: isActive ? "rgba(99,102,241,0.5)" : "transparent",
+    border: isActive ? "1px solid rgba(99,102,241,0.5)" : "1px solid transparent",
+    borderRadius: 7,
+    padding: "7px 16px",
+    color: isActive ? "#e2e8f0" : "#64748b",
+    fontSize: 13,
+    fontWeight: 700,
+    fontFamily: "'Barlow Condensed', sans-serif",
+    letterSpacing: 1,
+    cursor: "pointer",
+    transition: "all 0.15s",
+    textTransform: "uppercase",
+    textDecoration: "none",
+});
 
+export default function NavBar() {
     return (
-        <nav className="border-b border-gray-800 bg-gray-950/80 backdrop-blur sticky top-0 z-50">
-            <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
-                <Link to="/leaderboard" className="flex items-center gap-2 font-bold text-xl">
-                    <span className="text-2xl">🏏</span>
-                    <span className="text-green-400">Impact</span>
-                    <span className="text-white">Metric</span>
-                </Link>
-                <div className="flex items-center gap-1">
-                    <NavLink to="/leaderboard" className={linkClass}>Leaderboard</NavLink>
-                    <NavLink to="/compute" className={linkClass}>Compute IM</NavLink>
+        <div style={{ background: "rgba(255,255,255,0.02)", borderBottom: "1px solid rgba(255,255,255,0.06)", padding: "16px 24px", display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap", position: "sticky", top: 0, zIndex: 50, backdropFilter: "blur(10px)" }}>
+            <Link to="/leaderboard" style={{ display: "flex", alignItems: "center", gap: 12, textDecoration: "none" }}>
+                <div style={{ width: 36, height: 36, borderRadius: 8, background: "linear-gradient(135deg, #6366f1, #a78bfa)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>🏏</div>
+                <div>
+                    <div style={{ fontSize: 22, fontWeight: 900, color: "#e2e8f0", fontFamily: "'Barlow Condensed', sans-serif", letterSpacing: 2, lineHeight: 1 }}>CRICKET IMPACT METRIC</div>
+                    <div style={{ fontSize: 11, color: "#475569", fontFamily: "'Barlow Condensed', sans-serif", letterSpacing: 3 }}>PERFORMANCE × CONTEXT × SITUATION</div>
                 </div>
-            </div>
-        </nav>
+            </Link>
+            <nav style={{ marginLeft: "auto", display: "flex", gap: 4, background: "rgba(255,255,255,0.04)", borderRadius: 10, padding: 4 }}>
+                <NavLink to="/leaderboard" style={({ isActive }) => navLinkStyle(isActive)}>Leaderboard</NavLink>
+                <NavLink to="/compute" style={({ isActive }) => navLinkStyle(isActive)}>Compute IM</NavLink>
+            </nav>
+        </div>
     );
 }
