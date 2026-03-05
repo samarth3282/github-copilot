@@ -1,0 +1,57 @@
+services:
+  api:
+    build: ./backend
+    container_name: im_api
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://im_user:im_pass@db:5432/impact_metric
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  db:
+    image: postgres:15-alpine
+    container_name: im_db
+    environment:
+      POSTGRES_USER: im_user
+      POSTGRES_PASSWORD: im_pass
+      POSTGRES_DB: impact_metric
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U im_user -d impact_metric"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: im_redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  frontend:
+    image: node:20-alpine
+    container_name: im_frontend
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_PROXY_TARGET: http://api:8000
+    command: sh -c "npm install && npm run dev -- --host"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

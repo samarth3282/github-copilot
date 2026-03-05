@@ -1,0 +1,22 @@
+services:
+  api:
+    environment:
+      DATABASE_URL: postgresql://im_user:CHANGE_ME@db:5432/impact_metric
+      REDIS_URL: redis://redis:6379
+
+  db:
+    environment:
+      POSTGRES_PASSWORD: CHANGE_ME     # use a strong password
+    ports: []                           # don't expose DB to host
+
+  redis:
+    ports: []                           # don't expose Redis to host
+
+  frontend:
+    build: ./frontend
+    image: im_frontend_prod
+    ports:
+      - "80:80"
+    command: []
+    environment: {}
+    volumes: []
