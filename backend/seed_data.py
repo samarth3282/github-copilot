@@ -334,6 +334,12 @@ CONTRIBUTIONS = [
 
 def seed():
     db = SessionLocal()
+    # Idempotency guard — skip entirely if data is already present
+    from db import crud
+    if crud.get_player(db, "P001"):
+        print("Database already seeded — skipping.")
+        db.close()
+        return
     pipeline = ImpactMetricPipeline(db)
     inserted = 0
     errors   = 0
