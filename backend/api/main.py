@@ -4,6 +4,7 @@ Endpoints: /health, /players, /matches, /compute,
            /player/{id}/impact, /player/{id}/history, /player/{id}/breakdown,
            /leaderboard
 """
+import json
 import logging
 from datetime import date
 from typing import Any, Dict, List, Optional
@@ -13,16 +14,39 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from config import PARAMS
+import redis
+
+from config import FORMAT_STATS, PARAMS, REDIS_URL
 from db import crud
 from db.database import Base, engine, get_db
 from db import models  # noqa: F401 — ensures tables are known to SQLAlchemy
 from etl.pipeline import ImpactMetricPipeline
+from monitoring.drift import check_distribution_drift, check_null_rate
+from scoring.engine import calibrate_population_stats
+from training.optimizer import fit_impact_weights, apply_weights
 
 # Create DB tables on startup (idempotent)
 Base.metadata.create_all(bind=engine)
 
 logger = logging.getLogger(__name__)
+
+# ── Redis cache helper ────────────────────────────────────────────────────────
+_redis_client: Optional[Any] = None
+
+
+def get_redis():
+    """Return a Redis client if reachable, else None. App works without cache."""
+    global _redis_client
+    if _redis_client is None:
+        try:
+            _redis_client = redis.from_url(
+                REDIS_URL, decode_responses=True, socket_connect_timeout=1
+            )
+            _redis_client.ping()
+        except Exception:
+            _redis_client = None
+    return _redis_client
+
 
 app = FastAPI(
     title="Cricket Impact Metric API",
@@ -193,6 +217,15 @@ def compute_impact(contribution: ContributionRequest, db: Session = Depends(get_
         if data[key] is not None:
             data[key] = dict(data[key])
     result = pipeline.process_contribution(data)
+    # Invalidate leaderboard cache — a new score has been computed
+    r = get_redis()
+    if r:
+        try:
+            keys = r.keys("leaderboard:*")
+            if keys:
+                r.delete(*keys)
+        except Exception:
+            pass
     return ImpactResponse(**result)
 
 
@@ -292,5 +325,182 @@ def leaderboard(
     min_innings: int = Query(default=3, ge=1),
     db: Session = Depends(get_db),
 ):
-    """Return ranked leaderboard of players ordered by IM score."""
-    return crud.get_leaderboard(db, format_filter=format, limit=limit, min_innings=min_innings)
+    """Return ranked leaderboard of players ordered by IM score (Redis-cached for 60 s)."""
+    cache_key = f"leaderboard:{format}:{limit}:{min_innings}"
+    r = get_redis()
+    if r:
+        try:
+            cached = r.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
+    result = crud.get_leaderboard(db, format_filter=format, limit=limit, min_innings=min_innings)
+
+    if r:
+        try:
+            r.setex(cache_key, 60, json.dumps(result))
+        except Exception:
+            pass
+    return result
+
+# ── Admin / Data-Science Endpoints ──────────────────────────────────────
+
+@app.post("/admin/retrain", tags=["admin"])
+def retrain_weights(
+    format:      Optional[str] = Query(None, description="Limit to one format; None = all"),
+    min_samples: int           = Query(default=20, ge=5),
+    db: Session = Depends(get_db),
+):
+    """
+    Fit logistic-regression weights from historical contributions where
+    player_team_won is known.
+
+    **Data-driven design**: instead of hard-coded weights, this endpoint
+    optimises every coefficient to maximise prediction of match wins.
+    The scipy L-BFGS-B solver minimises logistic loss (with L2 regularisation)
+    subject to cricket-sensible box constraints.
+
+    Returns the learned weights and fit quality metrics. If there are fewer
+    than `min_samples` labelled contributions, the prior weights are kept
+    and a `skipped` flag is returned.
+    """
+    result = fit_impact_weights(
+        db,
+        format_stats_map=FORMAT_STATS,
+        format_filter=format,
+        min_samples=min_samples,
+    )
+    if result is None:
+        return {
+            "skipped": True,
+            "reason": f"Fewer than {min_samples} contributions with known outcomes.",
+            "current_weights": {
+                k: PARAMS[k] for k in [
+                    "w_runs", "w_sr", "w_boundaries", "w_dots_avoided",
+                    "w_wkts", "w_econ", "w_dots", "w_maidens", "w_catch", "w_runout",
+                ]
+            },
+        }
+    apply_weights(result["weights"], PARAMS)
+    return {
+        "skipped":      False,
+        "weights":      result["weights"],
+        "n_samples":    result["n_samples"],
+        "win_rate":     result["win_rate"],
+        "accuracy":     result["accuracy"],
+        "log_loss":     result["log_loss"],
+        "converged":    result["converged"],
+        "feature_importance": result["feature_importance"],
+    }
+
+
+@app.post("/admin/calibrate", tags=["admin"])
+def calibrate_normalization(
+    format:      Optional[str] = Query(None),
+    min_innings: int           = Query(default=3, ge=1),
+    db: Session = Depends(get_db),
+):
+    """
+    Recompute population μ / σ for parametric normalization from the
+    rolling raw impact scores currently in the database.
+
+    Call this after accumulating sufficient player history so that
+    the 50-baseline stays well-calibrated as the player pool grows.
+    """
+    all_scores = crud.get_all_rolling_scores(db, format_filter=format, min_innings=min_innings)
+    if len(all_scores) < 3:
+        raise HTTPException(400, "Need at least 3 players with scores to calibrate.")
+    stats = calibrate_population_stats(all_scores)
+    # Update live PARAMS so new /compute calls immediately use the new distribution
+    PARAMS["pop_mean"] = round(stats["mean"], 4)
+    PARAMS["pop_std"]  = round(max(stats["std"], 0.01), 4)  # guard against zero std
+    return {
+        "updated":    True,
+        "pop_mean":   PARAMS["pop_mean"],
+        "pop_std":    PARAMS["pop_std"],
+        "population": stats,
+    }
+
+
+@app.get("/admin/drift", tags=["admin"])
+def distribution_drift(
+    format:      Optional[str] = Query(None, description="Filter by format; None = all"),
+    threshold:   float         = Query(default=0.1, ge=0.0, le=1.0, description="JSD alert threshold"),
+    min_innings: int           = Query(default=3, ge=1),
+    db: Session = Depends(get_db),
+):
+    """
+    Report Jensen-Shannon divergence drift of the IM score distribution.
+
+    Fetches all current player IM scores (0-100), splits them into two halves
+    (older half = baseline, newer half = current) and computes JSD between
+    the two halves.  JSD > threshold (default 0.1) sets alert=True.
+    Also returns the null-rate: fraction of players with no valid IM score.
+    """
+    im_scores    = crud.get_all_im_scores(db, format_filter=format, min_innings=min_innings)
+    total_players = len(crud.list_players(db))
+    scored_count  = len(im_scores)
+    null_count    = max(total_players - scored_count, 0)
+
+    if len(im_scores) >= 6:
+        mid      = len(im_scores) // 2
+        baseline = im_scores[:mid]
+        current  = im_scores[mid:]
+        drift    = check_distribution_drift(current, baseline, threshold=threshold)
+    else:
+        drift = {
+            "jsd": 0.0, "alert": False, "threshold": threshold,
+            "note": "Need ≥ 6 scored players for drift detection.",
+        }
+
+    null_report = check_null_rate(total_players, null_count, threshold=0.20)
+
+    return {
+        "format":        format or "all",
+        "drift":         drift,
+        "null_rate":     null_report,
+        "player_counts": {
+            "total":          total_players,
+            "with_scores":    scored_count,
+            "without_scores": null_count,
+        },
+    }
+
+
+@app.get("/teams/{team_id}/elo", tags=["elo"])
+def get_team_elo(
+    team_id: str,
+    format: str = Query(default="T20"),
+    db: Session = Depends(get_db),
+):
+    """Get the current Elo rating for a team."""
+    rec = crud.get_latest_team_elo(db, team_id, format)
+    if not rec:
+        return {"team_id": team_id, "format": format, "elo": 1000.0, "rating_date": None}
+    return {
+        "team_id":     rec.team_id,
+        "format":      rec.format,
+        "elo":         float(rec.elo),
+        "rating_date": rec.rating_date.isoformat(),
+    }
+
+
+class EloSetRequest(BaseModel):
+    elo: float = Field(default=1000.0, ge=500.0, le=2000.0)
+    format: str = "T20"
+    rating_date: Optional[date] = None
+
+
+@app.post("/teams/{team_id}/elo", tags=["elo"])
+def set_team_elo(
+    team_id: str,
+    body: EloSetRequest,
+    db: Session = Depends(get_db),
+):
+    """Manually seed or override a team's Elo rating."""
+    from datetime import datetime
+    rd = body.rating_date or datetime.utcnow().date()
+    rec = crud.upsert_team_elo(db, team_id, body.elo, body.format, rd)
+    return {"team_id": rec.team_id, "elo": float(rec.elo), "format": rec.format, "rating_date": rec.rating_date.isoformat()}

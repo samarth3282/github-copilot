@@ -41,12 +41,21 @@ export default function ImpactMeter({ score, inningsCount = 0, size = 200 }) {
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
             <svg width={size} height={size * 0.78} viewBox={`0 0 ${size} ${size * 0.78}`}>
                 <path d={arcPath(startAngle, endAngle, r)} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={size * 0.07} />
-                {segments.map((seg, i) => (
-                    <path key={i} d={arcPath(seg.from, Math.min(seg.to, startAngle + (safeScore / 100) * totalArc), r)}
-                        fill="none" stroke={seg.color} strokeWidth={size * 0.065}
-                        opacity={seg.from < startAngle + (safeScore / 100) * totalArc ? 1 : 0.15}
-                    />
-                ))}
+                {segments.map((seg, i) => {
+                    const litEnd = Math.min(seg.to, needleAngle);
+                    if (seg.from >= needleAngle) {
+                        // Segment is entirely past the needle — render full segment dimmed
+                        return <path key={i} d={arcPath(seg.from, seg.to, r)} fill="none" stroke={seg.color} strokeWidth={size * 0.065} opacity={0.15} />;
+                    }
+                    return (
+                        <g key={i}>
+                            <path d={arcPath(seg.from, litEnd, r)} fill="none" stroke={seg.color} strokeWidth={size * 0.065} opacity={1} />
+                            {litEnd < seg.to && (
+                                <path d={arcPath(litEnd, seg.to, r)} fill="none" stroke={seg.color} strokeWidth={size * 0.065} opacity={0.15} />
+                            )}
+                        </g>
+                    );
+                })}
                 <polygon
                     points={`${needle.x},${needle.y} ${needleBase1.x},${needleBase1.y} ${needleBase2.x},${needleBase2.y}`}
                     fill={zone.color} opacity={0.95}

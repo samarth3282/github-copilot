@@ -110,11 +110,22 @@ def compute_performance_score(
     )
 
     # ── Role-based aggregation ────────────────────────────────────────────────
+    # Allrounder split is adaptive: weighted by the player's actual contribution
+    # magnitude this match rather than a fixed 60/40 ratio. This is data-driven —
+    # the weight is derived from what the player actually did, not a prior assumption.
     role = str(row.get("player_role", "batsman")).lower()
     if "bowler" in role and "all" not in role:
         perf_raw = bowl_raw + field_raw
     elif "all" in role:
-        perf_raw = 0.6 * bat_raw + 0.4 * bowl_raw + field_raw
+        bat_pos  = max(bat_raw, 0.0)
+        bowl_pos = max(bowl_raw, 0.0)
+        denom    = bat_pos + bowl_pos
+        if denom > 1e-9:
+            bat_w  = bat_pos / denom   # e.g. 0.72 if bat dominated
+            bowl_w = bowl_pos / denom  # e.g. 0.28
+        else:
+            bat_w, bowl_w = 0.6, 0.4  # fallback for DNB/DNB
+        perf_raw = bat_w * bat_raw + bowl_w * bowl_raw + field_raw
     else:  # batsman / wk-batsman
         perf_raw = bat_raw + field_raw
 

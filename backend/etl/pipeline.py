@@ -81,6 +81,21 @@ class ImpactMetricPipeline:
             result=data.get("match_result", ""),
         )
 
+        # ── 1b. Auto-resolve opposition Elo from DB if not explicitly provided ─
+        raw_opp_elo = data.get("opposition_elo")
+        if not raw_opp_elo or float(raw_opp_elo) == 1000.0:
+            match_rec = crud.get_match(self.db, match_id)
+            if match_rec and match_rec.team_a_id and match_rec.team_b_id:
+                player_team = data.get("team_id", "")
+                opp_team_id = (
+                    match_rec.team_b_id
+                    if match_rec.team_a_id == player_team
+                    else match_rec.team_a_id
+                )
+                elo_rec = crud.get_latest_team_elo(self.db, opp_team_id, fmt)
+                if elo_rec:
+                    data["opposition_elo"] = float(elo_rec.elo)
+
         # ── 2. Form-recovery bonus (pre-fetch last 3 IM scores) ───────────────
         recent_scores = crud.get_impact_score_history(
             self.db, player_id, n=3, format_filter=fmt
@@ -199,7 +214,40 @@ class ImpactMetricPipeline:
                 format_filter           = fmt,
             )
 
-        # ── 9. Build response ─────────────────────────────────────────────────
+        # ── 9. Auto-update team Elo ratings (Elo formula, K=32×importance) ──
+        player_team_won = data.get("player_team_won")
+        if player_team_won is not None:
+            match_rec = crud.get_match(self.db, match_id)
+            if match_rec and match_rec.team_a_id and match_rec.team_b_id:
+                player_team = data.get("team_id", "")
+                if player_team in (match_rec.team_a_id, match_rec.team_b_id):
+                    winner = player_team if player_team_won else (
+                        match_rec.team_b_id
+                        if match_rec.team_a_id == player_team
+                        else match_rec.team_a_id
+                    )
+                    loser = (
+                        match_rec.team_b_id
+                        if winner == match_rec.team_a_id
+                        else match_rec.team_a_id
+                    )
+                    # K-factor scales with match importance
+                    k_factor = 32.0 * float(data.get("match_importance", 1.0))
+                    w_rec = crud.get_latest_team_elo(self.db, winner, fmt)
+                    l_rec = crud.get_latest_team_elo(self.db, loser, fmt)
+                    w_elo = float(w_rec.elo) if w_rec else 1000.0
+                    l_elo = float(l_rec.elo) if l_rec else 1000.0
+                    expected_winner = 1.0 / (1.0 + 10.0 ** ((l_elo - w_elo) / 400.0))
+                    crud.upsert_team_elo(
+                        self.db, winner,
+                        w_elo + k_factor * (1.0 - expected_winner), fmt, match_date
+                    )
+                    crud.upsert_team_elo(
+                        self.db, loser,
+                        l_elo + k_factor * (0.0 - (1.0 - expected_winner)), fmt, match_date
+                    )
+
+        # ── 10. Build response ─────────────────────────────────────────────────
         last_10 = [float(c.raw_impact or 0) for c in recent_contribs]
 
         return {

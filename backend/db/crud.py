@@ -3,7 +3,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, and_, func
 
-from db.models import Player, Match, MatchContribution, PlayerImpactScore
+from db.models import Player, Match, MatchContribution, PlayerImpactScore, TeamEloRating
 
 
 # ── Players ───────────────────────────────────────────────────────────────────
@@ -234,3 +234,89 @@ def get_all_rolling_scores(
         .all()
     )
     return [float(r.rolling_raw_impact) for r in rows if r.rolling_raw_impact is not None]
+
+
+def get_all_im_scores(
+    db: Session,
+    format_filter: Optional[str] = None,
+    min_innings: int = 3,
+) -> List[float]:
+    """Return all current im_score values (0-100) for distribution drift monitoring."""
+    q = db.query(
+        PlayerImpactScore.player_id,
+        func.max(PlayerImpactScore.computed_at).label("latest_at"),
+    ).filter(PlayerImpactScore.innings_count >= min_innings)
+    if format_filter:
+        q = q.filter(PlayerImpactScore.format_filter == format_filter)
+    subq = q.group_by(PlayerImpactScore.player_id).subquery()
+
+    rows = (
+        db.query(PlayerImpactScore.im_score)
+        .join(
+            subq,
+            and_(
+                PlayerImpactScore.player_id == subq.c.player_id,
+                PlayerImpactScore.computed_at == subq.c.latest_at,
+            ),
+        )
+        .all()
+    )
+    return [float(r.im_score) for r in rows if r.im_score is not None]
+
+
+# ── Team Elo Ratings ──────────────────────────────────────────────────────────
+
+def get_latest_team_elo(
+    db: Session,
+    team_id: str,
+    format: str = "T20",
+) -> Optional[TeamEloRating]:
+    """Return the most recent Elo rating for a team in a given format."""
+    return (
+        db.query(TeamEloRating)
+        .filter(TeamEloRating.team_id == team_id, TeamEloRating.format == format)
+        .order_by(desc(TeamEloRating.rating_date))
+        .first()
+    )
+
+
+def upsert_team_elo(
+    db: Session,
+    team_id: str,
+    elo: float,
+    format: str,
+    rating_date: date,
+) -> TeamEloRating:
+    """Insert or update the Elo rating for a team on a given date."""
+    existing = (
+        db.query(TeamEloRating)
+        .filter(
+            TeamEloRating.team_id == team_id,
+            TeamEloRating.format == format,
+            TeamEloRating.rating_date == rating_date,
+        )
+        .first()
+    )
+    if existing:
+        existing.elo = round(elo, 2)
+        db.commit()
+        db.refresh(existing)
+        return existing
+    r = TeamEloRating(team_id=team_id, elo=round(elo, 2), format=format, rating_date=rating_date)
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+    return r
+
+
+def get_contributions_with_outcomes(
+    db: Session,
+    format_filter: Optional[str] = None,
+) -> List[MatchContribution]:
+    """Return all contributions where player_team_won is known (used for weight learning)."""
+    q = db.query(MatchContribution).filter(
+        MatchContribution.player_team_won.isnot(None)
+    )
+    if format_filter:
+        q = q.filter(MatchContribution.format == format_filter)
+    return q.all()
